@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ihs-lv-analytics
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: NODE_ENV=production node server/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: anthropic/claude-sonnet-4
+      - key: ACCESS_KEY
+        sync: false
+      - key: APP_URL
+        fromService:
+          type: web
+          name: ihs-lv-analytics
+          property: host
