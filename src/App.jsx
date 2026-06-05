@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { apiFetch, fetchAuthConfig, getStoredAccessKey, setStoredAccessKey } from "./api.js";
+import { apiFetch, fetchAuthConfig, getStoredAccessKey, setStoredAccessKey, getClientId, fetchConversations, fetchConversation, deleteConversation } from "./api.js";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -455,9 +455,20 @@ function AIChatTab(){
   const[input,setInput]=useState("");
   const[busy,setBusy]=useState(false);
   const[dot,setDot]=useState("");
+  const[conversationId,setConversationId]=useState(null);
+  const[history,setHistory]=useState([]);
+  const[historyOpen,setHistoryOpen]=useState(true);
   const bottomRef=useRef(null);
   const taRef=useRef(null);
 
+  const loadHistory=useCallback(async()=>{
+    try{
+      const list=await fetchConversations();
+      setHistory(list);
+    }catch{/* optional */}
+  },[]);
+
+  useEffect(()=>{ loadHistory(); },[loadHistory]);
   useEffect(()=>{ bottomRef.current?.scrollIntoView({behavior:"smooth"}); },[msgs,busy]);
   useEffect(()=>{
     if(!busy){setDot("");return;}
@@ -465,16 +476,48 @@ function AIChatTab(){
     return()=>clearInterval(iv);
   },[busy]);
 
+  const startNewChat=useCallback(()=>{
+    setConversationId(null);
+    setMsgs([]);
+    setInput("");
+  },[]);
+
+  const openConversation=useCallback(async(id)=>{
+    if(busy||id===conversationId)return;
+    try{
+      const conv=await fetchConversation(id);
+      setConversationId(conv.id);
+      setMsgs(conv.messages||[]);
+      setInput("");
+    }catch{
+      setMsgs([{role:"assistant",content:"⚠ Could not load that conversation."}]);
+    }
+  },[busy,conversationId]);
+
+  const removeConversation=useCallback(async(e,id)=>{
+    e.stopPropagation();
+    try{
+      await deleteConversation(id);
+      if(conversationId===id) startNewChat();
+      await loadHistory();
+    }catch{/* ignore */}
+  },[conversationId,startNewChat,loadHistory]);
+
   const send=useCallback(async(override)=>{
     const q=(override??input).trim(); if(!q||busy)return;
-    const history=[...msgs,{role:"user",content:q}];
-    setMsgs(history); setInput(""); setBusy(true);
+    const next=[...msgs,{role:"user",content:q}];
+    setMsgs(next); setInput(""); setBusy(true);
     if(taRef.current)taRef.current.style.height="auto";
     try{
       const res=await apiFetch("/api/chat",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({system:SYSTEM,messages:history}),
+        body:JSON.stringify({
+          system:SYSTEM,
+          messages:next,
+          clientId:getClientId(),
+          conversationId,
+        }),
       });
       const data=await res.json();
       let reply;
@@ -484,18 +527,65 @@ function AIChatTab(){
         reply="API Error: "+(data.error?.message||res.statusText||"Request failed");
       }else{
         reply=data.choices?.[0]?.message?.content||"No response from API.";
+        if(data.conversationId) setConversationId(data.conversationId);
+        loadHistory();
       }
       setMsgs(prev=>[...prev,{role:"assistant",content:reply}]);
     }catch(e){
       setMsgs(prev=>[...prev,{role:"assistant",content:"⚠ Error: "+e.message+". Is the server running? (npm run dev)"}]);
     }finally{setBusy(false);}
-  },[msgs,input,busy]);
+  },[msgs,input,busy,conversationId,loadHistory]);
 
   return(
-    <div style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0,gap:0}}>
+    <div style={{display:"flex",height:"100%",minHeight:0,gap:0}}>
+      {historyOpen&&(
+        <aside style={{width:200,flexShrink:0,borderRight:"0.5px solid var(--color-border-tertiary)",display:"flex",flexDirection:"column",background:"var(--color-background-secondary)"}}>
+          <div style={{padding:"10px 10px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+            <button onClick={startNewChat} disabled={busy}
+              style={{width:"100%",padding:"7px 10px",fontSize:12,cursor:busy?"default":"pointer",borderRadius:"var(--border-radius-md)",fontWeight:500}}>
+              + New chat
+            </button>
+          </div>
+          <div style={{flex:1,overflowY:"auto",padding:"6px 6px 10px"}}>
+            {history.length===0&&(
+              <p style={{fontSize:11,color:"var(--color-text-tertiary)",margin:"8px 6px",lineHeight:1.4}}>
+                Past chats appear here and are saved on the server.
+              </p>
+            )}
+            {history.map(c=>(
+              <div key={c.id} onClick={()=>openConversation(c.id)}
+                style={{
+                  padding:"8px",marginBottom:4,borderRadius:"var(--border-radius-md)",cursor:"pointer",
+                  background:conversationId===c.id?"var(--color-background-info)":"transparent",
+                  border:conversationId===c.id?"0.5px solid var(--color-border-info)":"0.5px solid transparent",
+                }}>
+                <p style={{fontSize:11,fontWeight:500,margin:0,color:"var(--color-text-primary)",lineHeight:1.35,overflow:"hidden",display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical"}}>{c.title}</p>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4}}>
+                  <span style={{fontSize:9,color:"var(--color-text-tertiary)"}}>
+                    {c.updatedAt?new Date(c.updatedAt).toLocaleDateString():""}
+                  </span>
+                  <button onClick={e=>removeConversation(e,c.id)} title="Delete"
+                    style={{fontSize:10,padding:"0 4px",cursor:"pointer",background:"transparent",border:"none",color:"var(--color-text-tertiary)"}}>
+                    ×
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </aside>
+      )}
+      <div style={{display:"flex",flexDirection:"column",flex:1,minWidth:0,minHeight:0,gap:0}}>
+        <div style={{padding:"6px 10px",borderBottom:"0.5px solid var(--color-border-tertiary)",display:"flex",alignItems:"center",gap:8}}>
+          <button onClick={()=>setHistoryOpen(o=>!o)} style={{fontSize:11,padding:"4px 8px",cursor:"pointer",borderRadius:"var(--border-radius-md)"}}>
+            {historyOpen?"◀ Hide":"▶ History"}
+          </button>
+          <span style={{fontSize:11,color:"var(--color-text-tertiary)"}}>
+            {conversationId?"Saved conversation":"New conversation — saved after first reply"}
+          </span>
+        </div>
       {msgs.length===0&&(
-        <div style={{marginBottom:14}}>
-          <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"0 0 8px"}}>Suggested queries (CY 2026 / CY 2027 forecast):</p>
+        <div style={{marginBottom:14,padding:"0 10px"}}>
+          <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"8px 0"}}>Suggested queries (CY 2026 / CY 2027 forecast):</p>
           <div style={{display:"flex",flexDirection:"column",gap:5}}>
             {CHIPS.map((c,i)=>(
               <button key={i} onClick={()=>send(c)} style={{textAlign:"left",padding:"8px 12px",cursor:"pointer",borderRadius:"var(--border-radius-md)",fontSize:12,lineHeight:1.5,color:"var(--color-text-primary)",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)"}}>
@@ -503,10 +593,9 @@ function AIChatTab(){
               </button>
             ))}
           </div>
-          {msgs.length>0&&<button onClick={()=>setMsgs([])} style={{fontSize:11,marginTop:10,cursor:"pointer",padding:"3px 9px",borderRadius:"var(--border-radius-md)"}}>Clear</button>}
         </div>
       )}
-      <div style={{flex:1,overflowY:"auto",paddingRight:4,minHeight:0}}>
+      <div style={{flex:1,overflowY:"auto",paddingRight:4,minHeight:0,padding:"0 10px"}}>
         {msgs.map((m,i)=>(
           <div key={i} style={{marginBottom:20,display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
             {m.role==="user"?(
@@ -531,7 +620,7 @@ function AIChatTab(){
         )}
         <div ref={bottomRef}/>
       </div>
-      <div style={{paddingTop:10,borderTop:"0.5px solid var(--color-border-tertiary)",marginTop:10}}>
+      <div style={{padding:"10px 10px 0",borderTop:"0.5px solid var(--color-border-tertiary)",marginTop:10}}>
         <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
           <textarea ref={taRef} value={input} onChange={e=>setInput(e.target.value)}
             onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
@@ -543,7 +632,8 @@ function AIChatTab(){
             Send ↗
           </button>
         </div>
-        <p style={{margin:"4px 0 0",fontSize:10,color:"var(--color-text-tertiary)"}}>Enter to send · Shift+Enter for new line</p>
+        <p style={{margin:"4px 0 0",fontSize:10,color:"var(--color-text-tertiary)"}}>Enter to send · Shift+Enter for new line · Chats saved per browser</p>
+      </div>
       </div>
     </div>
   );

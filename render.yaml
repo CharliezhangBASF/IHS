@@ -14,6 +14,8 @@ services:
         value: anthropic/claude-sonnet-4
       - key: ACCESS_KEY
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: APP_URL
         fromService:
           type: web
